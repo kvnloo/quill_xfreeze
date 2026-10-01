@@ -1,0 +1,15 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Quill field test</title>
+<body style="font:16px system-ui;padding:24px">
+<p>textarea</p>
+<textarea id="a" rows="4" cols="60">hello there.</textarea>
+<p>contenteditable (like the ChatGPT and Claude composers)</p>
+<div id="b" contenteditable style="border:1px solid #888;padding:8px;min-height:60px;width:480px">hello there.</div>
+<p>single-line input</p>
+<input id="c" size="60" value="hello there.">
+<script>
+  const target = location.hash.slice(1) || "a";
+  document.getElementById(target).focus();
+</script>
+</body>

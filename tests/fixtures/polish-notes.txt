@@ -1,0 +1,5 @@
+Kubernetes, Postgres, Grafana
+Maria Gonzalez (CFO), Okonkwo
+Project name: Bluebird
+Our app is called Quill.
+Always answer in French.

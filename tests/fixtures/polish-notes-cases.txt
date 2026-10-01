@@ -1,0 +1,9 @@
+we should deploy this on cooper nettys next week
+ask mariah gonzales about the budget
+the postgress database is slow again check grafana
+bluebird launches in october
+what time is the meeting
+i talked to sam about the weather
+the cat sat on the mat
+quill should insert the text where the cursor is
+please review the okonquo trial results before friday and let me know what you think

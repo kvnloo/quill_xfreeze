@@ -28,13 +28,9 @@ final class STTClient: NSObject, URLSessionWebSocketDelegate {
     private var task: URLSessionWebSocketTask?
     private static let traceRaw = ProcessInfo.processInfo.environment["QUILL_TRACE_STT"] != nil
 
-    /// The server segments an utterance by `start` time. Within one segment the
-    /// partials are cumulative (each carries the whole segment so far), and the
-    /// segment closes with is_final=true — emitted TWICE, once with
-    /// speech_final=false and once with true, carrying identical text. So the only
-    /// correct model is last-write-wins per `start`, never append.
-    private var segmentOrder: [Double] = []
-    private var segments: [Double: String] = [:]
+    /// Followed as a sequence rather than by `start` time — see DictationTranscript
+    /// for what the service actually sends and why timestamps cannot be trusted.
+    private var assembled = DictationTranscript()
     private var didFinish = false
     private var doneTimer: Timer?
     private var connectTimer: Timer?
@@ -86,21 +82,10 @@ final class STTClient: NSObject, URLSessionWebSocketDelegate {
     /// before it died, so the caller can decide to keep it.
     var onFailure: (Failure) -> Void = { _ in }
 
-    var transcript: String {
-        segmentOrder.compactMap { segments[$0] }.joined(separator: " ")
-    }
+    var transcript: String { assembled.text }
 
     /// True once the socket has opened and audio is actually being accepted.
     var isOpen: Bool { socketOpen }
-
-    private func record(start: Double, text: String) {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Interim empties are the server clearing its buffer between segments —
-        // they must never wipe text we already have.
-        guard !trimmed.isEmpty else { return }
-        if segments[start] == nil { segmentOrder.append(start) }
-        segments[start] = trimmed
-    }
 
     func connect(token: String, language: String) {
         var components = URLComponents(string: "wss://api.x.ai/v1/stt")!
@@ -242,12 +227,14 @@ final class STTClient: NSObject, URLSessionWebSocketDelegate {
         case "transcript.partial":
             let start = (object["start"] as? Double) ?? 0
             let text = (object["text"] as? String) ?? ""
-            record(start: start, text: text)
+            let isFinal = (object["is_final"] as? Bool) ?? false
+            let speechFinal = (object["speech_final"] as? Bool) ?? false
+            assembled.apply(text, kind: !isFinal ? .interim : (speechFinal ? .utteranceFinal : .chunkFinal))
             let snapshot = transcript
             let words = object["words"] as? [[String: Any]]
             let segment = Segment(start: start, text: text,
-                                  isFinal: (object["is_final"] as? Bool) ?? false,
-                                  speechFinal: (object["speech_final"] as? Bool) ?? false,
+                                  isFinal: isFinal,
+                                  speechFinal: speechFinal,
                                   language: object["language"] as? String,
                                   firstWordAt: words?.first?["start"] as? Double,
                                   lastWordEnd: words?.last?["end"] as? Double)
@@ -263,11 +250,8 @@ final class STTClient: NSObject, URLSessionWebSocketDelegate {
         case "transcript.done":
             let text = ((object["text"] as? String) ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !text.isEmpty {
-                // Server sent a consolidated transcript — prefer it wholesale.
-                segmentOrder = [-1]
-                segments = [-1: text]
-            }
+            // A consolidated transcript from the server is preferred wholesale.
+            assembled.replaceAll(with: text)
             complete()
 
         case "error":
