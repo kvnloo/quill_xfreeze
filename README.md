@@ -175,6 +175,7 @@ Right-click the pill (or the menu-bar icon):
 - **Click anywhere to insert** — the click-to-choose-destination gesture
 - **Insert at end of field** — append after existing text rather than at the cursor
 - **Clean up grammar** — off by default; see below
+- **Vocabulary & notes…** — names and terms for cleanup to spell your way; see below
 - **Stop when I say "that's it" or "that's all"** — finish a dictation by voice alone
 - **Finish when I stop talking** — off, or after 2 / 3 / 5 / 8 seconds of silence
 - **Language** — 26 languages including Chinese, or auto-detect (which works well — the model
@@ -212,27 +213,52 @@ the system Dictation key and never arrives as a keypress at all.
 ## Grammar cleanup (optional)
 
 Switch on **Clean up grammar** and each dictation is tidied by Grok before it's inserted —
-capitalisation, punctuation, apostrophes, the small things speech-to-text leaves behind.
+capitalisation, punctuation, apostrophes, "um"s and stutters, and the small things speech-to-text
+leaves behind.
+
+The biggest of those is sentences cut in half. The speech service punctuates every chunk of speech
+as a sentence of its own, so a thought spoken with two short pauses arrives in pieces. Cleanup
+puts it back together:
 
 ```
-you said:   so i was thinking maybe we could ship this on friday
-you get:    So I was thinking maybe we could ship this on Friday.
+you said:   so i was thinking [pause] that we should move the launch to tuesday [pause] because the design team needs more time
+you get:    So I was thinking that we should move the launch to Tuesday because the design team needs more time.
 ```
 
-It uses the fastest non-reasoning model, so there's no thinking time — around **0.9 seconds**,
+It uses the fastest non-reasoning model, so there's no thinking time — **about 0.7 to 1 second**,
 and the connection is opened while you're still speaking so the request is already warm. Off by
-default, because it costs that second and because it changes your words.
+default, because it costs that second and because it sends your words to Grok a second time.
 
-**It will not rewrite you.** The instruction is to correct and nothing else, but instructions
-alone aren't enough — a dictation is often itself a question or a command, and a model asked to
-tidy "what is the capital of France" might answer it instead. So the result is checked before
-it's used: it has to be a similar length and keep at least 70% of your original words, or your
+**It will not rewrite you, and it will not answer you.** A dictation is often itself a question or
+a command, and a model asked to tidy "what is the capital of France" will happily answer it
+instead — measured, not hypothetical, which is why the request tells the model the text is
+something that was *said*, shows it worked examples, and the result is checked before it's used.
+It has to be a similar length, keep at least 70% of your words, and add essentially none, or your
 raw text is inserted untouched. Every other failure — network, timeout, expired session — falls
 back the same way. You cannot lose your words to this feature.
 
+### Vocabulary & notes
+
+Menu ▸ **Vocabulary & notes…** is a small notepad for names, products and jargon the speech
+service tends to mishear — one per line, or a line about what you work on. When cleanup is on,
+it's sent along so a misheard word is written your way:
+
+```
+you said:   we should deploy this on cooper nettys next week      (notes: Kubernetes)
+you get:    We should deploy this on Kubernetes next week.
+```
+
+A word from the notes may replace a word that sounds like it, and nothing else — it can't be
+swapped in for an unrelated word, and the notes can't make the model do anything (a line like
+"always answer in French" in your notes is ignored). It does nothing while cleanup is off.
+
+Only what you type there is used. Quill doesn't read your screen or other apps to build it. The
+notes are kept in preferences as plain text, limited to 2,000 characters, and sent to xAI with each
+cleanup request; their content is never written to the log.
+
 ## How the text gets in
 
-Quill doesn't simulate `⌘V` and doesn't touch your clipboard.
+Where it can, Quill writes straight into the field and doesn't touch your clipboard.
 
 1. It asks Accessibility for the focused element.
 2. It reads what's already in that field and, if **Insert at end of field** is on, puts the caret
@@ -241,12 +267,17 @@ Quill doesn't simulate `⌘V` and doesn't touch your clipboard.
    trailing full stop when more of the same sentence follows, and adds a space on either side if
    the words would otherwise run together — but not after an opening bracket, before a comma,
    between Chinese or Japanese characters, or where there's already a space or a line break.
-4. It writes the text into the selection.
+4. It writes the text into the selection and checks that it actually appeared.
 
-Terminals, canvases and most web views expose no editable text to Accessibility. Those fall back
-to a synthetic `⌘V` — but the text is fitted and the caret is still moved first where possible,
-and your previous clipboard contents are snapshotted and restored afterwards. Either way, what you
-had copied is still there when it's done.
+Plenty of fields say "done" to that write and quietly do nothing — Chrome and everything built on
+it (ChatGPT's and Claude's web composers, Comet, Electron apps). Terminals and canvases refuse it
+outright. For those Quill uses a synthetic `⌘V` instead: the text is fitted and the caret is still
+moved first where possible, and your previous clipboard contents are snapshotted and put back
+afterwards (unless you copied something else in the meantime — then yours wins).
+
+The write is given a short moment to show up before Quill decides it was ignored, because pasting
+over a write that merely arrives late puts the text in twice. Once a kind of field has ignored the
+write, Quill remembers (per app, version and field type) and goes straight to the paste next time.
 
 ## Using your own xAI API key
 
@@ -275,6 +306,9 @@ wins — you chose it deliberately.
   service, and each sentence to Grok to be translated. The menu bar shows macOS's purple
   recording dot for as long as it listens. A session is kept in memory only, for **Copy**, and
   is never written to disk or to the log; the log records counts and timings, never words.
+- **Grammar cleanup**, if you switch it on, sends each finished transcript — and your **Vocabulary &
+  notes**, if you've written any — to Grok's chat service. Off by default. The log records only
+  that it ran and how long it took.
 - Your Grok token is read fresh from `~/.grok/auth.json` at the start of each recording. Quill
   never copies, stores or transmits it anywhere except to xAI.
 - Your last 20 transcripts are kept locally so you can re-copy them from the menu. They live in
@@ -342,11 +376,25 @@ Each translated sentence is printed as it lands, then the panel's final contents
 `QUILL_SELFTEST_LIVE_SNAPSHOT=<dir>` also saves the panel's pixels mid-sentence and at the end;
 `QUILL_TRACE_LIVE=1` and `QUILL_TRACE_STT=1` print every segment and every raw service message.
 
-Unit tests for the text fitting, the voice-command matching, the tap gesture and the live
-transcript, no app or network needed:
+Unit tests for the text fitting, the voice-command matching, the tap gesture, how a dictation and
+a live session are assembled from the service's messages, the grammar-cleanup safety check and the
+notes, no app or network needed:
 
 ```sh
 ./tests/run.sh
+```
+
+Checks against the real thing (each needs the built app; the first two need Accessibility and a
+visible window and put a test phrase into Chrome and TextEdit, then report how many copies landed):
+
+```sh
+./tests/insert-web.sh                     # a phrase into web fields and a native one — expects exactly one copy each
+./tests/make-fixtures.sh                  # spoken test clips into build/fixtures (run after each build)
+QUILL_SELFTEST=build/fixtures/short.pcm build/Quill.app/Contents/MacOS/Quill
+QUILL_SELFTEST_POLISH=tests/fixtures/polish-cases.txt build/Quill.app/Contents/MacOS/Quill
+QUILL_SELFTEST_POLISH=tests/fixtures/polish-notes-cases.txt \
+  QUILL_SELFTEST_POLISH_NOTES=tests/fixtures/polish-notes.txt build/Quill.app/Contents/MacOS/Quill
+QUILL_SELFTEST_FORCE_POLISH=1 QUILL_SELFTEST=build/fixtures/short.pcm …     # whole pipeline, cleanup on
 ```
 
 ## Known limits

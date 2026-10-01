@@ -270,6 +270,16 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { NSApp.terminate(nil) }
             }
+        } else if let png = ProcessInfo.processInfo.environment["QUILL_SELFTEST_NOTES_DIALOG"] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                NotesPrompt.show(cleanupIsOn: false, snapshotTo: png)
+                NSApp.terminate(nil)
+            }
+        } else if let path = ProcessInfo.processInfo.environment["QUILL_SELFTEST_POLISH"] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.runPolishSelfTest(path) }
+        } else if let text = ProcessInfo.processInfo.environment["QUILL_SELFTEST_INSERT_TEXT"] {
+            let delay = Double(ProcessInfo.processInfo.environment["QUILL_SELFTEST_DELAY"] ?? "") ?? 3
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.runInsertSelfTest(text) }
         } else if let liveTest = ProcessInfo.processInfo.environment["QUILL_SELFTEST_LIVE"] {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.startLiveSelfTest(liveTest) }
         } else if selfTestPath != nil {
@@ -428,6 +438,11 @@ final class QuillApp: NSObject, NSApplicationDelegate {
                   action: #selector(toggleInsertAtEnd))
         addToggle(to: menu, title: "Clean up grammar", key: Defaults.polish,
                   action: #selector(togglePolish))
+        let notesItem = NSMenuItem(title: ContextNotes.isEmpty ? "Vocabulary & notes…" : "Vocabulary & notes… ✓",
+                                   action: #selector(editNotes), keyEquivalent: "")
+        notesItem.target = self
+        notesItem.toolTip = "Names and terms Quill should spell your way when grammar cleanup is on."
+        menu.addItem(notesItem)
         addToggle(to: menu, title: "Stop when I say \u{201C}that\u{2019}s it\u{201D} or \u{201C}that\u{2019}s all\u{201D}", key: Defaults.stopPhrase,
                   action: #selector(toggleStopPhrase))
 
@@ -635,6 +650,15 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         hud.collapse(after: 3)
     }
 
+    @objc private func editNotes() {
+        let cleanupIsOn = Defaults.bool(Defaults.polish)
+        guard NotesPrompt.show(cleanupIsOn: cleanupIsOn), !ContextNotes.isEmpty else { return }
+        hud.apply(.notice(cleanupIsOn
+            ? "Notes saved — cleanup will use them"
+            : "Notes saved — they apply once Clean up grammar is on"))
+        hud.collapse(after: 3)
+    }
+
     @objc private func setPause(_ sender: NSMenuItem) {
         guard let seconds = sender.representedObject as? Double else { return }
         UserDefaults.standard.set(seconds, forKey: Defaults.pauseSeconds)
@@ -790,6 +814,66 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         }
         Log.write("double tap — live translation \(live.isRunning ? "off" : "on")")
         live.toggle()
+    }
+
+    /// QUILL_SELFTEST_POLISH=<file> runs each line of the file through grammar
+    /// cleanup exactly as a finished dictation would be, and prints before/after.
+    private func runPolishSelfTest(_ path: String) {
+        func out(_ line: String) { FileHandle.standardError.write(Data((line + "\n").utf8)) }
+        guard let creds = Auth.current(),
+              let contents = try? String(contentsOfFile: path, encoding: .utf8)
+        else {
+            out("POLISH: no credentials or cannot read \(path)")
+            NSApp.terminate(nil)
+            return
+        }
+        let lines = contents.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
+        let notes = ProcessInfo.processInfo.environment["QUILL_SELFTEST_POLISH_NOTES"]
+            .flatMap { try? String(contentsOfFile: $0, encoding: .utf8) } ?? ""
+        Polisher.warm(token: creds.token)
+        var index = 0
+        func next() {
+            guard index < lines.count else { NSApp.terminate(nil); return }
+            let line = lines[index]
+            index += 1
+            let started = Date()
+            Polisher.polish(line, token: creds.token, notes: notes) { result in
+                let ms = Int(Date().timeIntervalSince(started) * 1000)
+                out("[\(index)] \(ms)ms \(result == line ? "UNCHANGED" : "CHANGED")")
+                out("   in:  \(line)")
+                if result != line { out("   out: \(result)") }
+                next()
+            }
+        }
+        next()
+    }
+
+    /// QUILL_SELFTEST_INSERT_TEXT=<text> inserts that text into whichever field
+    /// is focused after QUILL_SELFTEST_DELAY seconds (default 3), through the
+    /// real insertion path, then reports how many times it actually landed.
+    private func runInsertSelfTest(_ text: String) {
+        func out(_ line: String) { FileHandle.standardError.write(Data((line + "\n").utf8)) }
+        let before = Inserter.focusedFieldValue() ?? "<field not readable>"
+        out("SELFTEST FOCUS: \(Inserter.describeFocus())")
+        Inserter.insert(text,
+                        atEndOfField: Defaults.bool(Defaults.insertAtEnd),
+                        language: "en") { outcome in
+            let method: String
+            switch outcome.method {
+            case .accessibility: method = "accessibility"
+            case .clipboard:     method = "clipboard"
+            case .blocked:       method = "BLOCKED (no Accessibility)"
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                let after = Inserter.focusedFieldValue() ?? "<field not readable>"
+                let landed = after.components(separatedBy: text).count - 1
+                out("SELFTEST METHOD: \(method) → \(outcome.app ?? "unknown app")")
+                out("SELFTEST BEFORE: \(before.debugDescription)")
+                out("SELFTEST AFTER:  \(after.debugDescription)")
+                out("SELFTEST LANDED: \(landed)x")
+                NSApp.terminate(nil)
+            }
+        }
     }
 
     /// QUILL_SELFTEST_LIVE=<file.pcm> plays a 16 kHz mono PCM16 file through
@@ -1343,6 +1427,11 @@ final class QuillApp: NSObject, NSApplicationDelegate {
     }
 
     private func finishSession(_ session: Session, with text: String) {
+        // However the words arrived, a dictation is delivered once.
+        guard session.phase != .delivering else {
+            Log.write("  finish ignored — already delivering")
+            return
+        }
         // A socket that dies mid-dictation completes with what it has; make sure
         // the microphone and the timers are not left running behind it.
         if session.isRecording { leaveRecordingState(session, reason: .hotkey) }
@@ -1370,7 +1459,11 @@ final class QuillApp: NSObject, NSApplicationDelegate {
         remember(trimmed)
         if session.ownsHUD { hud.update(text: trimmed) }
 
-        guard Defaults.bool(Defaults.polish), let creds = Auth.current() else {
+        // QUILL_SELFTEST_FORCE_POLISH lets a test run cleanup without changing the
+        // saved preference.
+        let cleanupOn = Defaults.bool(Defaults.polish)
+            || ProcessInfo.processInfo.environment["QUILL_SELFTEST_FORCE_POLISH"] != nil
+        guard cleanupOn, let creds = Auth.current() else {
             completeSession(session, with: trimmed)
             return
         }
@@ -1380,7 +1473,7 @@ final class QuillApp: NSObject, NSApplicationDelegate {
             hud.apply(.thinking)
             hud.update(text: trimmed)
         }
-        Polisher.polish(trimmed, token: creds.token) { [weak self] result in
+        Polisher.polish(trimmed, token: creds.token, notes: ContextNotes.text) { [weak self] result in
             self?.completeSession(session, with: result)
         }
     }

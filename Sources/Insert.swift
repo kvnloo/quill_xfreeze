@@ -201,16 +201,22 @@ enum Inserter {
 
         // Replacing a selection wins over appending: the user highlighted
         // something specific and expects exactly that to be swapped out.
+        let fieldKey = currentFieldKey()
+
         if let selection, restore(selection) {
-            if setSelectedText(payload), confirmLanded(payload) {
-                Log.write("  → replaced selection (\(selection.range.length) chars)")
-                completion(Outcome(method: .accessibility, app: app))
+            let before = focusedValue()
+            guard !ignoresAccessibilityWrites(fieldKey), setSelectedText(payload) else {
+                pasteOverSelection(payload, app: app, completion: completion)
                 return
             }
-            // The selection is restored, so a paste will overwrite it too.
-            insertViaClipboard(payload) {
-                Log.write("  → replaced selection via paste")
-                completion(Outcome(method: isTrusted ? .clipboard : .blocked, app: app))
+            awaitLanding(payload, before: before, replacing: true) { landed in
+                if landed {
+                    Log.write("  → replaced selection (\(selection.range.length) chars)")
+                    completion(Outcome(method: .accessibility, app: app))
+                } else {
+                    learnIgnoresAccessibilityWrites(fieldKey)
+                    pasteOverSelection(payload, app: app, completion: completion)
+                }
             }
             return
         }
@@ -244,36 +250,136 @@ enum Inserter {
                 + "atEnd=\(landingAtEnd) boundary=\(boundaryOffset.map(String.init) ?? "?")/\(existing?.utf16.count ?? -1)")
         }
 
-        let forceClipboard = ProcessInfo.processInfo.environment["QUILL_FORCE_CLIPBOARD"] != nil
-        if !forceClipboard {
-            let wrote = setSelectedText(payload)
-            if wrote, confirmLanded(payload) {
-                Log.write("  → accessibility, confirmed")
-                completion(Outcome(method: .accessibility, app: app))
-                return
+        func pasteInstead() {
+            insertViaClipboard(payload) {
+                let trusted = isTrusted
+                Log.write("  → clipboard fallback (⌘V posted), trusted=\(trusted)")
+                completion(Outcome(method: trusted ? .clipboard : .blocked, app: app))
             }
-            // Which half failed matters: a setter that succeeds but does not show
-            // up on read-back is a web view quietly ignoring us, and the paste
-            // below is the only way in.
-            Log.write("  accessibility write \(wrote ? "accepted but not visible on read-back" : "refused") — pasting instead")
         }
 
-        insertViaClipboard(payload) {
-            let trusted = isTrusted
-            Log.write("  → clipboard fallback (⌘V posted), trusted=\(trusted)")
-            completion(Outcome(method: trusted ? .clipboard : .blocked, app: app))
+        let forceClipboard = ProcessInfo.processInfo.environment["QUILL_FORCE_CLIPBOARD"] != nil
+        guard !forceClipboard else {
+            pasteInstead()
+            return
+        }
+
+        guard !ignoresAccessibilityWrites(fieldKey) else {
+            Log.write("  this kind of field ignores accessibility writes — pasting")
+            pasteInstead()
+            return
+        }
+
+        guard setSelectedText(payload) else {
+            Log.write("  accessibility write refused — pasting instead")
+            pasteInstead()
+            return
+        }
+
+        // The setter answered "success", which is not the same as the words being
+        // there: some web views ignore it, and others apply it a moment later.
+        // Pasting while a late write is still on its way puts the text in twice,
+        // so give it a short window to appear before deciding it never will.
+        awaitLanding(payload, before: existing, replacing: false) { landed in
+            if landed {
+                Log.write("  → accessibility, confirmed")
+                completion(Outcome(method: .accessibility, app: app))
+            } else {
+                learnIgnoresAccessibilityWrites(fieldKey)
+                pasteInstead()
+            }
         }
     }
 
-    /// Did the Accessibility write actually take? Several apps — web views in
-    /// particular — return success from the setter and change nothing. If the
-    /// field cannot be read back at all we have to take the setter at its word.
-    private static func confirmLanded(_ payload: String) -> Bool {
+    // MARK: Fields that ignore Accessibility writes
+
+    private static let ignoredFieldsKey = "axWriteIgnoredBy"
+
+    /// The app, its version and the kind of field. Per field kind rather than per
+    /// app because one app has both: Comet's address bar takes the write, the
+    /// page's text areas swallow it. Per version so an update gets a fresh look.
+    private static func currentFieldKey() -> String? {
+        guard let app = NSWorkspace.shared.frontmostApplication,
+              let identifier = app.bundleIdentifier
+        else { return nil }
+        let version = app.bundleURL.flatMap { Bundle(url: $0) }?
+            .infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        var role = "?"
+        if let element = focusedElement() {
+            var ref: CFTypeRef?
+            if AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &ref) == .success,
+               let value = ref as? String {
+                role = value
+            }
+        }
+        return "\(identifier)@\(version)|\(role)"
+    }
+
+    private static func ignoresAccessibilityWrites(_ key: String?) -> Bool {
+        guard let key else { return false }
+        return (UserDefaults.standard.stringArray(forKey: ignoredFieldsKey) ?? []).contains(key)
+    }
+
+    /// Remembered so the next insert goes straight to the paste instead of
+    /// writing, waiting and then pasting anyway — which is also the only way to
+    /// be certain a write that arrives late can never be followed by a paste.
+    private static func learnIgnoresAccessibilityWrites(_ key: String?) {
+        Log.write("  accessibility write accepted but never appeared — pasting instead")
+        guard let key, !ignoresAccessibilityWrites(key) else { return }
+        var known = UserDefaults.standard.stringArray(forKey: ignoredFieldsKey) ?? []
+        known.append(key)
+        UserDefaults.standard.set(Array(known.suffix(200)), forKey: ignoredFieldsKey)
+    }
+
+    private static func pasteOverSelection(_ payload: String, app: String?, completion: @escaping (Outcome) -> Void) {
+        // The selection is restored, so a paste overwrites it too.
+        insertViaClipboard(payload) {
+            Log.write("  → replaced selection via paste")
+            completion(Outcome(method: isTrusted ? .clipboard : .blocked, app: app))
+        }
+    }
+
+    /// How long an accepted write gets to show up before it is written off.
+    private static let landingWindow: TimeInterval = 0.3
+    private static let landingPoll: TimeInterval = 0.03
+
+    /// Native fields answer on the first look, so the common case never waits.
+    private static func awaitLanding(_ payload: String,
+                                     before: String?,
+                                     replacing: Bool,
+                                     completion: @escaping (Bool) -> Void) {
+        let deadline = Date().addingTimeInterval(landingWindow)
+        func look() {
+            if confirmLanded(payload, before: before, replacing: replacing) {
+                completion(true)
+            } else if Date() >= deadline {
+                completion(false)
+            } else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + landingPoll, execute: look)
+            }
+        }
+        look()
+    }
+
+    /// Did the Accessibility write actually take? If the field cannot be read
+    /// back at all we have to take the setter at its word.
+    ///
+    /// Appending counts copies: the same words may already be in the field
+    /// ("Yes." is a sentence people say twice), so merely finding them proves
+    /// nothing. Replacing a selection can only be judged by the field having
+    /// changed and now containing the words.
+    private static func confirmLanded(_ payload: String, before: String?, replacing: Bool) -> Bool {
         guard let readback = focusedFieldValue() else { return true }
         let needle = payload.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !needle.isEmpty else { return true }
         let tail = String(needle.suffix(24))
-        return readback.contains(tail)
+        guard let before else { return readback.contains(tail) }
+        if replacing { return readback != before && readback.contains(tail) }
+        return occurrences(of: tail, in: readback) > occurrences(of: tail, in: before)
+    }
+
+    private static func occurrences(of needle: String, in haystack: String) -> Int {
+        haystack.components(separatedBy: needle).count - 1
     }
 
     /// The focused field's current contents, without disturbing anything.
@@ -355,6 +461,7 @@ enum Inserter {
 
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
+        let ours = pasteboard.changeCount
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
             pressCommandV()
@@ -366,6 +473,9 @@ enum Inserter {
             completion()
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+                // If anything else has been copied since, that is the user's
+                // clipboard now, and putting the old one back would overwrite it.
+                guard pasteboard.changeCount == ours else { return }
                 restore(saved, to: pasteboard)
             }
         }

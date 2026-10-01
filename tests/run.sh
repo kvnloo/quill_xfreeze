@@ -22,6 +22,21 @@ swiftc -swift-version 5 -o "$OUT/taps" Sources/TapSequence.swift tests/TapSequen
 "$OUT/taps"
 
 echo
+echo "→ DictationText"
+swiftc -swift-version 5 -o "$OUT/dictation" Sources/DictationText.swift tests/DictationTextTest.swift
+"$OUT/dictation"
+
+echo
+echo "→ PolishGuard"
+swiftc -swift-version 5 -o "$OUT/polishguard" Sources/PolishGuard.swift tests/PolishGuardTest.swift
+"$OUT/polishguard"
+
+echo
+echo "→ ContextNotes"
+swiftc -swift-version 5 -o "$OUT/notes" Sources/ContextNotes.swift tests/ContextNotesTest.swift
+"$OUT/notes"
+
+echo
 echo "→ LiveText"
 swiftc -swift-version 5 -o "$OUT/livetext" Sources/LiveText.swift tests/LiveTextTest.swift
 "$OUT/livetext"
