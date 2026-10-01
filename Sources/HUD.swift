@@ -404,13 +404,13 @@ private final class HUDView: NSView {
         dot.translatesAutoresizingMaskIntoConstraints = false
 
         elapsedLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
-        elapsedLabel.textColor = NSColor.white.withAlphaComponent(0.55)
+        elapsedLabel.textColor = NSColor.white.withAlphaComponent(0.7)
         elapsedLabel.translatesAutoresizingMaskIntoConstraints = false
 
         waveform.translatesAutoresizingMaskIntoConstraints = false
 
         targetLabel.font = .systemFont(ofSize: 11, weight: .medium)
-        targetLabel.textColor = NSColor.white.withAlphaComponent(0.48)
+        targetLabel.textColor = NSColor.white.withAlphaComponent(0.62)
         targetLabel.alignment = .right
         targetLabel.lineBreakMode = .byTruncatingTail
         targetLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -515,7 +515,7 @@ private final class HUDView: NSView {
             elapsedLabel.isHidden = false
             waveform.isHidden = false
             transcriptLabel.stringValue = "Listening… click where the words should go"
-            transcriptLabel.textColor = NSColor.white.withAlphaComponent(0.38)
+            transcriptLabel.textColor = NSColor.white.withAlphaComponent(0.52)
 
         case .thinking:
             enterExpanded()
