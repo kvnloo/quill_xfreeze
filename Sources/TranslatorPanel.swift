@@ -41,9 +41,58 @@ final class TranslatorPanel {
     /// self-test. A process may capture its own windows without Screen Recording.
     func snapshotPNG() -> Data? {
         guard let panel, panel.isVisible else { return nil }
-        guard let image = CGWindowListCreateImage(.null, .optionIncludingWindow, CGWindowID(panel.windowNumber),
-                                                  [.boundsIgnoreFraming, .bestResolution]) else { return nil }
-        return NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])
+        if let image = CGWindowListCreateImage(.null, .optionIncludingWindow, CGWindowID(panel.windowNumber),
+                                               [.boundsIgnoreFraming, .bestResolution]),
+           !Self.isBlank(image) {
+            return NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])
+        }
+        // A locked or sleeping display composites nothing, and the window server
+        // hands back black. Draw the views themselves over a stand-in backdrop.
+        return renderOffscreenPNG()
+    }
+
+    private static func isBlank(_ image: CGImage) -> Bool {
+        let width = image.width, height = image.height
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let space = CGColorSpaceCreateDeviceRGB()
+        let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(data: buffer.baseAddress, width: width, height: height,
+                                          bitsPerComponent: 8, bytesPerRow: width * 4, space: space,
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard drawn else { return true }
+        for index in stride(from: 0, to: pixels.count, by: 4)
+        where pixels[index] != 0 || pixels[index + 1] != 0 || pixels[index + 2] != 0 {
+            return false
+        }
+        return true
+    }
+
+    private func renderOffscreenPNG() -> Data? {
+        root.layoutSubtreeIfNeeded()
+        let bounds = root.bounds
+        guard let layerRep = root.bitmapImageRepForCachingDisplay(in: bounds) else { return nil }
+        root.cacheDisplay(in: bounds, to: layerRep)
+
+        let margin: CGFloat = 24
+        let size = NSSize(width: bounds.width + margin * 2, height: bounds.height + margin * 2)
+        let scale = CGFloat(layerRep.pixelsWide) / bounds.width
+        guard let out = NSBitmapImageRep(bitmapDataPlanes: nil,
+                                         pixelsWide: Int(size.width * scale), pixelsHigh: Int(size.height * scale),
+                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                         colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+              let context = NSGraphicsContext(bitmapImageRep: out) else { return nil }
+        out.size = size
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        NSGradient(starting: NSColor(calibratedRed: 0.36, green: 0.43, blue: 0.55, alpha: 1),
+                   ending: NSColor(calibratedRed: 0.70, green: 0.62, blue: 0.58, alpha: 1))?
+            .draw(in: NSRect(origin: .zero, size: size), angle: -35)
+        layerRep.draw(in: NSRect(x: margin, y: margin, width: bounds.width, height: bounds.height))
+        NSGraphicsContext.restoreGraphicsState()
+        return out.representation(using: .png, properties: [:])
     }
 
     func show() {
@@ -177,8 +226,8 @@ private final class PanelView: NSView {
     static let width: CGFloat = 460
     private static let gap: CGFloat = 8
     private static let transcriptHeight: CGFloat = 136
-    private static let translationHeight: CGFloat = 150
-    private static let soloHeight: CGFloat = 190
+    private static let translationHeight: CGFloat = 166
+    private static let soloHeight: CGFloat = 206
 
     var onClose: () -> Void = {}
     var onCopy: () -> Void = {}
@@ -214,10 +263,10 @@ private final class PanelView: NSView {
     private let copyButton = HoverButton()
     private let closeButton = HoverButton()
 
-    private let heardLabel = NSTextField(labelWithString: "HEARD")
+    private let heardLabel = NSTextField(labelWithString: "Heard")
     private let targetButton = HoverButton()
-    private let originalText = CaptionView(fontSize: 13, weight: .regular, dimAlpha: 0.42)
-    private let translatedText = CaptionView(fontSize: 15.5, weight: .medium, dimAlpha: 0.48)
+    private let originalText = CaptionView(fontSize: 13, weight: .regular, dimAlpha: 0.5)
+    private let translatedText = CaptionView(fontSize: 17, weight: .medium, dimAlpha: 0.56)
     private let noticeLabel = NSTextField(wrappingLabelWithString: "")
     private let noticeButton = HoverButton()
     private var noticeAction: (() -> Void)?
@@ -244,7 +293,7 @@ private final class PanelView: NSView {
         dot.layer?.backgroundColor = NSColor.systemRed.cgColor
 
         elapsedLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
-        elapsedLabel.textColor = NSColor.white.withAlphaComponent(0.55)
+        elapsedLabel.textColor = NSColor.white.withAlphaComponent(0.7)
 
         style(sourceButton, title: "System audio", menu: true)
         sourceButton.toolTip = "What to listen to"
@@ -262,17 +311,17 @@ private final class PanelView: NSView {
             button.imagePosition = .imageOnly
             button.isBordered = false
             button.toolTip = tip
-            button.baseAlpha = 0.5
+            button.baseAlpha = 0.62
         }
         layoutButton.onClick = { [weak self] in self?.onToggleLayout() }
         copyButton.onClick = { [weak self] in self?.onCopy() }
         closeButton.onClick = { [weak self] in self?.onClose() }
 
-        heardLabel.font = .systemFont(ofSize: 10, weight: .semibold)
-        heardLabel.textColor = NSColor.white.withAlphaComponent(0.36)
+        heardLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        heardLabel.textColor = NSColor.white.withAlphaComponent(0.56)
         heardLabel.lineBreakMode = .byTruncatingTail
 
-        style(targetButton, title: "ENGLISH", menu: true, caps: true)
+        style(targetButton, title: "English", menu: true, pill: true)
         targetButton.toolTip = "Translate into…"
         targetButton.onClick = { [weak self] in
             guard let self else { return }
@@ -280,7 +329,7 @@ private final class PanelView: NSView {
         }
 
         noticeLabel.font = .systemFont(ofSize: 13, weight: .regular)
-        noticeLabel.textColor = NSColor.white.withAlphaComponent(0.5)
+        noticeLabel.textColor = NSColor.white.withAlphaComponent(0.62)
         noticeLabel.isSelectable = false
         noticeLabel.maximumNumberOfLines = 3
 
@@ -299,10 +348,11 @@ private final class PanelView: NSView {
             .withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
     }
 
-    private func style(_ button: HoverButton, title: String, menu: Bool, caps: Bool = false) {
+    private func style(_ button: HoverButton, title: String, menu: Bool, pill: Bool = false) {
         button.isBordered = false
-        button.baseAlpha = caps ? 0.62 : 0.5
-        button.font = caps ? .systemFont(ofSize: 10, weight: .semibold) : .systemFont(ofSize: 11, weight: .medium)
+        button.pill = pill
+        button.baseAlpha = pill ? 0.82 : 0.62
+        button.font = pill ? .systemFont(ofSize: 11.5, weight: .semibold) : .systemFont(ofSize: 11, weight: .medium)
         button.setTitle(title, chevron: menu)
     }
 
@@ -352,13 +402,13 @@ private final class PanelView: NSView {
         // Translation card.
         let top: CGFloat = layoutMode == .both ? 14 : 40
         targetButton.sizeToFit()
-        targetButton.frame = NSRect(x: pad - 2, y: top - 2, width: targetButton.frame.width + 4, height: 18)
-        let textTop = top + 20
+        targetButton.frame = NSRect(x: pad, y: top - 2, width: targetButton.frame.width + 20, height: 22)
+        let textTop = top + 28
         translatedText.frame = NSRect(x: pad, y: textTop, width: w - pad * 2,
                                       height: translationCard.frame.height - textTop - 14)
         noticeLabel.frame = NSRect(x: pad, y: textTop + 2, width: w - pad * 2, height: 54)
         noticeButton.sizeToFit()
-        noticeButton.frame = NSRect(x: pad - 2, y: textTop + 58, width: noticeButton.frame.width + 4, height: 18)
+        noticeButton.frame = NSRect(x: pad - 2, y: textTop + 62, width: noticeButton.frame.width + 4, height: 18)
     }
 
     // MARK: Content
@@ -396,11 +446,11 @@ private final class PanelView: NSView {
     }
 
     func setHeard(_ languageName: String?) {
-        heardLabel.stringValue = languageName.map { "HEARD · \($0.uppercased())" } ?? "HEARD"
+        heardLabel.stringValue = languageName.map { "Heard in \($0)" } ?? "Heard"
     }
 
     func setTarget(_ languageName: String) {
-        targetButton.setTitle(languageName.uppercased(), chevron: true)
+        targetButton.setTitle(languageName, chevron: true)
         needsLayout = true
     }
 
@@ -591,8 +641,8 @@ private final class CaptionView: NSView {
 
     func show(_ lines: [TranslatorPanel.Line]) {
         let paragraph = NSMutableParagraphStyle()
-        paragraph.lineSpacing = 2
-        paragraph.paragraphSpacing = 6
+        paragraph.lineSpacing = max(2, font.pointSize * 0.2)
+        paragraph.paragraphSpacing = font.pointSize * 0.45
 
         let out = NSMutableAttributedString()
         for (index, line) in lines.suffix(maxLines).enumerated() {
@@ -646,6 +696,14 @@ private final class HoverButton: NSButton {
 
     var onClick: () -> Void = {}
     var baseAlpha: CGFloat = 0.5 { didSet { refresh() } }
+    /// A soft capsule behind the title, so a picker reads as something to press.
+    var pill = false {
+        didSet {
+            wantsLayer = pill
+            layer?.cornerCurve = .continuous
+            refresh()
+        }
+    }
     private var hovering = false
     private var plainTitle = ""
     private var chevron = false
@@ -670,14 +728,25 @@ private final class HoverButton: NSButton {
     private func refresh() {
         let color = NSColor.white.withAlphaComponent(hovering ? min(1, baseAlpha + 0.4) : baseAlpha)
         contentTintColor = color
+        if pill {
+            layer?.backgroundColor = NSColor.white.withAlphaComponent(hovering ? 0.17 : 0.09).cgColor
+        }
         guard !plainTitle.isEmpty else {
             attributedTitle = NSAttributedString(string: "")
             return
         }
+        let centred = NSMutableParagraphStyle()
+        centred.alignment = .center
         attributedTitle = NSAttributedString(string: plainTitle + (chevron ? "  ▾" : ""), attributes: [
             .font: font ?? .systemFont(ofSize: 11),
             .foregroundColor: color,
+            .paragraphStyle: centred,
         ])
+    }
+
+    override func layout() {
+        super.layout()
+        if pill { layer?.cornerRadius = bounds.height / 2 }
     }
 
     override func updateTrackingAreas() {
